@@ -1,0 +1,16 @@
+[package]
+name = "texoxide"
+version = "1.0.0"
+edition = "2021"
+description = "Zoxide but for text files"
+license = "GPL-3.0"
+repository = "https://github.com/arxari/texoxide"
+keywords = ["text-editing", "tui"]
+categories = ["command-line-utilities"]
+
+[dependencies]
+anyhow = "1.0.95"
+crossterm = "0.28.1"
+ratatui = "0.29.0"
+directories = "6.0.0"
+rusqlite = { version = "0.33.0", features = ["bundled"] }
