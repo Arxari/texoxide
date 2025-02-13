@@ -1,6 +1,6 @@
 [package]
 name = "texoxide"
-version = "1.0.0"
+version = "1.0.1"
 edition = "2021"
 description = "Zoxide but for text files"
 license = "GPL-3.0"
@@ -13,4 +13,6 @@ anyhow = "1.0.95"
 crossterm = "0.28.1"
 ratatui = "0.29.0"
 directories = "6.0.0"
+camino = "1.1.9"
+clap = { version = "4.5.29", features = ["derive"] }
 rusqlite = { version = "0.33.0", features = ["bundled"] }

@@ -1,4 +1,6 @@
 use anyhow::{Context, Result};
+use camino::{Utf8Path, Utf8PathBuf};
+use clap::{Parser, Subcommand};
 use crossterm::{
     event::{self, Event, KeyCode, KeyEventKind},
     execute,
@@ -17,9 +19,26 @@ use rusqlite::{params, Connection};
 use std::{
     env,
     io::{self, stdout},
-    path::Path,
     process::Command,
 };
+
+#[derive(Parser)]
+#[command(author, version, about, long_about = None)]
+struct Cli {
+    #[arg(value_name = "QUERY")]
+    query: Option<String>,
+
+    #[command(subcommand)]
+    command: Option<Commands>,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+    Remove {
+        #[arg(value_name = "FILE_PATH")]
+        file_path: String,
+    },
+}
 
 struct TermUI {
     terminal: Terminal<CrosstermBackend<io::Stdout>>,
@@ -64,6 +83,10 @@ impl TermUI {
     }
 }
 
+fn clean_path(path: &str) -> &str {
+    path.strip_prefix("\\\\?\\").unwrap_or(path)
+}
+
 impl Drop for TermUI {
     fn drop(&mut self) {
         let _ = self.restore();
@@ -96,7 +119,14 @@ fn ui(f: &mut Frame, menu: &mut Menu) {
         let items: Vec<ListItem> = menu
             .items
             .iter()
-            .map(|i| ListItem::new(i.as_str()).style(Style::default().fg(Color::White)))
+            .map(|i| {
+                let display = if cfg!(windows) {
+                    clean_path(i)
+                } else {
+                    i.as_str()
+                };
+                ListItem::new(display).style(Style::default().fg(Color::White))
+            })
             .collect();
 
         let list_widget = List::new(items)
@@ -155,43 +185,34 @@ impl Texoxide {
     }
 
     fn add(&self, file_path: &str) -> Result<()> {
-        let path = Path::new(file_path);
-        if !path.exists() {
+        let path = Utf8Path::new(file_path);
+        if !path.as_std_path().exists() {
             anyhow::bail!("File {file_path} does not exist");
         }
 
-        let abs_path = path
-            .canonicalize()?
-            .to_str()
-            .context("Invalid file path encoding")?
+        let canonical = path.as_std_path().canonicalize()?;
+        let abs_path = Utf8PathBuf::from_path_buf(canonical)
+            .map_err(|_| anyhow::anyhow!("Invalid file path encoding"))?
             .to_string();
 
-        let mut stmt = self.conn.prepare(
-            "UPDATE files
-            SET last_accessed = CURRENT_TIMESTAMP,
-                frequency = frequency + 1
-            WHERE path = ?",
+        self.conn.execute(
+            "INSERT INTO files (path, frequency) VALUES (?, 1)
+             ON CONFLICT(path) DO UPDATE SET
+                 frequency = frequency + 1,
+                 last_accessed = CURRENT_TIMESTAMP",
+            params![&abs_path],
         )?;
-
-        if stmt.execute(params![&abs_path])? == 0 {
-            self.conn.execute(
-                "INSERT INTO files (path, frequency)
-                VALUES (?, 1)",
-                params![&abs_path],
-            )?;
-        }
-
         Ok(())
     }
 
     fn remove_entry(&self, file_path: &str) -> Result<()> {
-        let path = Path::new(file_path);
-
+        let path = Utf8Path::new(file_path);
         let abs_path = path
+            .as_std_path()
             .canonicalize()
-            .unwrap_or_else(|_| file_path.into())
-            .to_string_lossy()
-            .into_owned();
+            .ok()
+            .and_then(|p| Utf8PathBuf::from_path_buf(p).ok())
+            .map_or_else(|| file_path.to_string(), |p| p.to_string());
 
         let count = self
             .conn
@@ -208,7 +229,7 @@ impl Texoxide {
         let mut to_remove = Vec::new();
         for row in rows {
             let path: String = row?;
-            if !Path::new(&path).exists() {
+            if !Utf8Path::new(&path).as_std_path().exists() {
                 to_remove.push(path);
             }
         }
@@ -216,20 +237,6 @@ impl Texoxide {
             self.conn
                 .execute("DELETE FROM files WHERE path = ?", params![path])?;
         }
-        Ok(())
-    }
-
-    #[allow(clippy::unused_self)]
-    fn open_file(&self, file_path: &str) -> Result<()> {
-        #[cfg(windows)]
-        let editor = env::var("EDITOR").unwrap_or_else(|_| "notepad".to_string());
-        #[cfg(not(windows))]
-        let editor = env::var("EDITOR").unwrap_or_else(|_| "vim".to_string());
-
-        Command::new(editor)
-            .arg(file_path)
-            .status()
-            .context("Failed to open $EDITOR")?;
         Ok(())
     }
 
@@ -250,6 +257,19 @@ impl Texoxide {
         }
         Ok(results)
     }
+}
+
+fn open_file(file_path: &str) -> Result<()> {
+    #[cfg(windows)]
+    let editor = env::var("EDITOR").unwrap_or_else(|_| "notepad".to_string());
+    #[cfg(not(windows))]
+    let editor = env::var("EDITOR").unwrap_or_else(|_| "vim".to_string());
+
+    Command::new(editor)
+        .arg(file_path)
+        .status()
+        .context("Failed to open $EDITOR")?;
+    Ok(())
 }
 
 struct Menu<'a> {
@@ -287,24 +307,19 @@ impl<'a> Menu<'a> {
 }
 
 fn main() -> Result<()> {
-    let args: Vec<String> = env::args().collect();
-    let mut ui = TermUI::new()?;
+    let cli = Cli::parse();
     let texoxide = Texoxide::new()?;
 
-    if args.len() > 1 && args[1] == "remove" {
-        if args.len() > 2 {
-            let file_to_remove = &args[2];
-            texoxide.remove_entry(file_to_remove)?;
-            println!("Removed {file_to_remove} from list");
-        } else {
-            eprintln!("Usage: {} remove <file_path>", args[0]);
-        }
+    if let Some(Commands::Remove { file_path }) = cli.command {
+        texoxide.remove_entry(&file_path)?;
+        println!("Removed {file_path} from list");
         return Ok(());
     }
 
+    let mut ui = TermUI::new()?;
     texoxide.cleanup()?;
 
-    let search_term = args.get(1).map_or("", String::as_str);
+    let search_term = cli.query.as_deref().unwrap_or("");
     let results = texoxide.query(search_term)?;
 
     if !results.is_empty() {
@@ -313,11 +328,11 @@ fn main() -> Result<()> {
         if let Some(idx) = selection {
             let path = &results[idx];
             texoxide.add(path)?;
-            texoxide.open_file(path)?;
+            open_file(path)?;
         }
-    } else if Path::new(search_term).exists() {
+    } else if !search_term.is_empty() && Utf8Path::new(search_term).as_std_path().exists() {
         texoxide.add(search_term)?;
-        texoxide.open_file(search_term)?;
+        open_file(search_term)?;
     } else {
         eprintln!("No matches for '{search_term}'");
     }
